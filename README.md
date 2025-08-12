@@ -47,7 +47,7 @@ A state-of-the-art language model based on OpenAI's GPT-OSS architecture, specif
 |------------|------------|--------|-------|-----------|---------|---------|------------|-----------------|
 | **tiny**   | **151.2M** | 6      | 8     | 512       | 1024    | 4       | ~0.6GB     | Testing, development |
 | **small**  | **422.6M** | 12     | 12    | 768       | 2048    | 8       | ~1.7GB     | Prototyping |
-| **medium** | **1.6B**   | 24     | 16    | 1024      | 4096    | 16      | ~6.4GB     | 🔥 **Recommended** |
+| **medium** | **1.6B**   | 24     | 16    | 1024      | 4096    | 16      | ~6.4GB     |  **Recommended** |
 | **large**  | **5.4B**   | 32     | 20    | 1280      | 8192    | 32      | ~21.6GB    | High quality |
 | **xlarge** | **14.6B**  | 48     | 32    | 1536      | 8192    | 64      | ~58.4GB    | Maximum quality |
 
