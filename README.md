@@ -1,45 +1,45 @@
-# 🚀 GPT-OSS Advanced Children's Stories Model
+# GPT-OSS Advanced Children's Stories Model
 
 A state-of-the-art language model based on OpenAI's GPT-OSS architecture, specifically optimized for generating engaging and educational children's stories. This implementation combines the advanced features of GPT-OSS with high-performance computing optimizations for systems like NVIDIA H100.
 
-## ⚡ Performance Highlights
+## Performance Highlights
 
-- 🔥 **H100 Optimized**: Beast mode processing with up to 200 CPU cores
-- 🚀 **Scalable Models**: From 151M to 14.6B parameters
-- ⚡ **Ultra-Fast Data Processing**: 96x parallel processing speedup
-- 💾 **Memory Efficient**: Smart batch sizing for 80GB GPU memory
-- 🎯 **Production Ready**: Mixed precision, gradient accumulation, checkpointing
+- **H100 Optimized**: Beast mode processing with up to 200 CPU cores
+- **Scalable Models**: From 151M to 14.6B parameters
+- **Ultra-Fast Data Processing**: 96x parallel processing speedup
+- **Memory Efficient**: Smart batch sizing for 80GB GPU memory
+- **Production Ready**: Mixed precision, gradient accumulation, checkpointing
 
-## 🌟 Features
+## Features
 
-### 🧠 GPT-OSS Architecture
+### GPT-OSS Architecture
 - **Mixture of Experts (MoE)**: Efficient expert routing with 4-64 experts per layer
 - **Extended Context Length**: Support for up to 8,192 tokens
 - **Sliding Window Attention**: Memory-efficient attention patterns
 - **Grouped Query Attention (GQA)**: Shared key-value heads for efficiency
 - **Multi-token Prediction**: Simultaneous prediction of 1-3 future tokens
 
-### 🏎️ High-Performance Computing
+### High-Performance Computing
 - **Beast Mode**: Aggressive multiprocessing for high-core systems
 - **H100 Integration**: Optimized for 80GB GPU memory utilization
 - **Smart Batch Sizing**: Automatic optimization based on model size
 - **Memory Management**: Efficient handling of 896K+ text datasets
 - **Parallel Data Processing**: Up to 200 worker processes
 
-### 📚 Educational Focus
+### Educational Focus
 - **Children's Story Generation**: Age-appropriate, engaging content
 - **Clean Dataset**: Filtered for inappropriate content
 - **Story Validation**: Automatic quality checks
 - **Structured Output**: Consistent narrative formatting
 
-### 🛠️ Production Features
+### Production Features
 - **Mixed Precision Training**: FP16/BF16 for faster training
 - **Gradient Accumulation**: Large effective batch sizes
 - **Model Compilation**: PyTorch 2.0 optimization
 - **Distributed Training**: Multi-GPU support
 - **Comprehensive Monitoring**: Weights & Biases integration
 
-## 📊 Model Specifications
+## Model Specifications
 
 ### Available Model Sizes
 
@@ -62,7 +62,7 @@ A state-of-the-art language model based on OpenAI's GPT-OSS architecture, specif
 | extended | 25000 | 16 | 8 | 128 | 2e-4 | GPU optimized |
 | marathon | 50000 | 24 | 8 | 192 | 1.5e-4 | Long training |
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -87,7 +87,7 @@ The setup script will:
 
 ### Training Commands
 
-#### 🧪 Quick Test (Tiny Model)
+#### Quick Test (Tiny Model)
 ```bash
 python src/run_training.py \
     --model-size tiny \
@@ -98,7 +98,7 @@ python src/run_training.py \
     --mixed-precision
 ```
 
-#### ⚡ Standard Training (Recommended)
+#### Standard Training (Recommended)
 ```bash
 python src/run_training.py \
     --model-size medium \
@@ -112,7 +112,7 @@ python src/run_training.py \
     --beast-mode
 ```
 
-#### 🔥 H100 Beast Mode (Maximum Performance)
+#### H100 Beast Mode (Maximum Performance)
 ```bash
 python src/run_training.py \
     --model-size large \
@@ -127,7 +127,7 @@ python src/run_training.py \
     --max-workers 128
 ```
 
-#### 💥 Ultimate Power (XLarge Model)
+#### Ultimate Power (XLarge Model)
 ```bash
 python src/run_training.py \
     --model-size xlarge \
@@ -145,10 +145,10 @@ python src/run_training.py \
 
 **Beast Mode** is designed for high-performance systems (H100, high CPU count):
 
-- 🚀 **Aggressive Multiprocessing**: Uses up to 75% of available CPU cores
-- ⚡ **Smart Scaling**: Automatically detects system capabilities
-- 💾 **Memory Optimization**: Efficient chunking for large datasets
-- 🎯 **Timeout Protection**: Prevents infinite loops with intelligent fallbacks
+- **Aggressive Multiprocessing**: Uses up to 75% of available CPU cores
+- **Smart Scaling**: Automatically detects system capabilities
+- **Memory Optimization**: Efficient chunking for large datasets
+- **Timeout Protection**: Prevents infinite loops with intelligent fallbacks
 
 **Enable Beast Mode:**
 ```bash
@@ -157,11 +157,11 @@ python src/run_training.py \
 --max-workers 156  # Manual override (75% of 208 cores)
 ```
 
-## 📈 Performance Optimization
+## Performance Optimization
 
 ### For Different Systems
 
-#### 🖥️ Standard Workstation (RTX 4090, 16-32 cores)
+#### Standard Workstation (RTX 4090, 16-32 cores)
 ```bash
 python src/run_training.py \
     --model-size small \
@@ -169,7 +169,7 @@ python src/run_training.py \
     --gradient-accumulation-steps 4
 ```
 
-#### 🏢 High-End Workstation (A100, 64+ cores)
+#### High-End Workstation (A100, 64+ cores)
 ```bash
 python src/run_training.py \
     --model-size medium \
@@ -178,7 +178,7 @@ python src/run_training.py \
     --beast-mode
 ```
 
-#### 🚀 Data Center (H100, 100+ cores)
+#### Data Center (H100, 100+ cores)
 ```bash
 python src/run_training.py \
     --model-size large \
@@ -198,7 +198,7 @@ python src/run_training.py \
 | large | 64 | ~45-60GB | 70% |
 | xlarge | 32 | ~70-80GB | 95% |
 
-## 🎯 Story Generation
+## Story Generation
 
 ### Interactive Mode
 ```bash
@@ -233,29 +233,29 @@ python src/generate.py \
     --length-penalty 1.0
 ```
 
-## 🏗️ Architecture Details
+## Architecture Details
 
 ### GPT-OSS Innovations
 
-1. **🧠 Mixture of Experts (MoE)**
+1. **Mixture of Experts (MoE)**
    - Sparse activation with expert routing
    - Load balancing across experts
    - Auxiliary loss for training stability
    - Configurable expert count per layer
 
-2. **⚡ Advanced Attention**
+2. **Advanced Attention**
    - Sliding window attention (128-1024 tokens)
    - Attention sinks for long contexts
    - Grouped Query Attention (GQA)
    - RoPE positional embeddings with YaRN scaling
 
-3. **🔧 Modern Optimizations**
+3. **Modern Optimizations**
    - SwiGLU activation function
    - RMSNorm for better stability
    - Multi-token prediction (1-3 tokens)
    - Gradient checkpointing for memory efficiency
 
-4. **🚀 High-Performance Features**
+4. **High-Performance Features**
    - Mixed precision training (FP16/BF16)
    - Model compilation (PyTorch 2.0)
    - Gradient accumulation
@@ -263,15 +263,15 @@ python src/generate.py \
 
 ### Data Processing Pipeline
 
-1. **📥 Data Loading**: Hugging Face datasets or local files
-2. **🧹 Text Cleaning**: Normalization and filtering
-3. **✅ Story Validation**: Quality and appropriateness checks
-4. **🔢 Tokenization**: GPT-OSS harmony tokenizer (201,088 vocab)
-5. **📦 Sequence Creation**: Sliding window chunking
-6. **🔄 Parallel Processing**: Multi-core optimization
-7. **💾 Binary Storage**: Efficient .bin format
+1. **Data Loading**: Hugging Face datasets or local files
+2. **Text Cleaning**: Normalization and filtering
+3. **Story Validation**: Quality and appropriateness checks
+4. **Tokenization**: GPT-OSS harmony tokenizer (201,088 vocab)
+5. **Sequence Creation**: Sliding window chunking
+6. **Parallel Processing**: Multi-core optimization
+7. **Binary Storage**: Efficient .bin format
 
-## 📋 Configuration System
+## Configuration System
 
 ### Model Configuration
 ```python
@@ -302,7 +302,7 @@ config = DataConfig(
 )
 ```
 
-## 🔧 Advanced Usage
+## Advanced Usage
 
 ### Custom Dataset Training
 ```bash
@@ -336,7 +336,7 @@ python src/run_training.py \
     --max-workers 200
 ```
 
-## 🔍 Monitoring & Debugging
+## Monitoring & Debugging
 
 ### Weights & Biases Integration
 ```bash
@@ -363,7 +363,7 @@ python src/run_training.py \
     --num-samples 10
 ```
 
-## 🛠️ Development
+## Development
 
 ### Project Structure
 ```
@@ -385,7 +385,7 @@ src/
 - `AdvancedDataProcessor`: High-performance data processing
 - `ModelConfig/TrainingConfig/DataConfig`: Configuration management
 
-## 📊 Benchmarks
+## Benchmarks
 
 ### Training Speed (H100 80GB)
 
@@ -406,7 +406,7 @@ src/
 | 100K texts | 128 | ~1.8 minutes | 25x |
 | 896K texts | 96 | ~8 minutes | 96x |
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
@@ -414,11 +414,11 @@ src/
 4. Add tests if applicable
 5. Submit a pull request
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - OpenAI for the GPT-OSS architecture
 - Microsoft for DeepSeek optimizations
@@ -426,11 +426,11 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Hugging Face for datasets and transformers
 - The open-source ML community
 
-## 📞 Support
+## Support
 
-- 🐛 **Issues**: GitHub Issues
-- 💬 **Discussions**: GitHub Discussions  
-- 📧 **Email**: plakhera@ideaweaver.ai
+- **Issues**: GitHub Issues
+- **Discussions**: GitHub Discussions  
+- **Email**: plakhera@ideaweaver.ai
 
 ---
 
