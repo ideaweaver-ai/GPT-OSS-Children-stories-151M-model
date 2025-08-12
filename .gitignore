@@ -1,0 +1,125 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Training and Data Files (EXCLUDE FROM REPO)
+# ===========================================
+# Processed data files (exclude data directory but allow src/data code)
+/data/
+*.bin
+*.idx
+*.dat
+
+# Model checkpoints and weights
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+models/
+weights/
+saved_models/
+
+# Training logs and outputs
+logs/
+runs/
+outputs/
+results/
+experiments/
+wandb/
+tensorboard/
+*.log
+
+# Generated samples and evaluation results
+samples/
+generated/
+eval_results/
+*.txt
+*.json
+!requirements.txt
+!setup.json
+!*_config.json
+
+# Cache directories
+.cache/
+cache/
+tmp/
+temp/
+
+# Jupyter notebooks (if any)
+.ipynb_checkpoints/
+*.ipynb
+
+# Large files and datasets
+*.zip
+*.tar.gz
+*.tar.bz2
+*.7z
+*.rar
+
+# Hugging Face cache
+.cache/
+transformers_cache/
+huggingface_hub/
+
+# CUDA/GPU related
+*.cuda
+*.cudnn
+
+# Temporary calculation files
+calculate_*.py
+temp_*.py
+debug_*.py
+
+# Keep only essential config and code files
+!src/
+!requirements.txt
+!setup.sh
+!README.md
+!LICENSE
+!docs/
+!*.py

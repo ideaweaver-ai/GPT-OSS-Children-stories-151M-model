@@ -1,0 +1,954 @@
+"""
+GPT-OSS Advanced Model for Children's Stories
+Combines GPT-OSS architecture with Tiny Stories and DeepSeek formatting
+
+Features from GPT-OSS:
+- Sliding Window Attention with Attention Sinks
+- Mixture of Experts (MoE) with advanced routing
+- RMSNorm instead of LayerNorm  
+- SwiGLU activation
+- RoPE with YaRN scaling
+- ✅ MXFP4 quantization IMPLEMENTED (Native GPT-OSS quantization)
+- Grouped Query Attention
+
+Features from DeepSeek:
+- Multi-token prediction
+- Multihead Latent Attention option
+- Advanced training optimizations
+
+Format similar to Tiny Stories:
+- Clean, educational code structure
+- Comprehensive documentation
+- Easy-to-understand implementation
+"""
+
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional, Tuple, List, Union
+from dataclasses import dataclass
+import numpy as np
+
+
+@dataclass
+class GPTOSSAdvancedConfig:
+    """Configuration for GPT-OSS Advanced model optimized for children's stories"""
+    # Model architecture (GPT-OSS specifications)
+    vocab_size: int = 201088     # GPT-OSS vocabulary size
+    n_layer: int = 12            # Number of transformer layers (scaled down from GPT-OSS)
+    n_head: int = 16             # Number of attention heads
+    n_embd: int = 768            # Embedding dimension
+    block_size: int = 8192       # Extended context window like GPT-OSS
+    # Note: GPT-OSS does NOT use dropout - removed for compliance
+    bias: bool = True            # Use bias in linear layers
+    
+    # Advanced attention features (from GPT-OSS)
+    num_key_value_heads: int = 4  # Grouped query attention
+    sliding_window: int = 256     # Sliding window size (0 = no sliding window)
+    use_attention_sinks: bool = True  # Enable attention sinks
+    head_dim: int = 64           # Dimension per attention head
+    
+    # RoPE configuration (GPT-OSS uses ONLY RoPE, no learned positional embeddings)
+    rope_theta: float = 10000.0
+    rope_scaling_factor: float = 1.0
+    rope_ntk_alpha: float = 1.0
+    rope_ntk_beta: float = 32.0
+    
+    # MoE configuration (from GPT-OSS, scaled down)
+    num_experts: int = 8         # Reduced from 128 for smaller model
+    experts_per_token: int = 2   # Top-k routing
+    expert_capacity: float = 1.25
+    moe_aux_loss_coeff: float = 0.01
+    moe_layers: List[int] = None  # Which layers use MoE (None = all)
+    
+    # Multi-token prediction (from DeepSeek)
+    multi_token_predict: int = 2  # Predict next 2 tokens
+    
+    # Quantization support (from GPT-OSS)
+    use_quantization: bool = False
+    quantization_bits: int = 4
+    
+    # Advanced optimizations
+    use_swiglu: bool = True      # SwiGLU activation instead of GELU
+    use_rmsnorm: bool = True     # RMSNorm instead of LayerNorm
+    swiglu_limit: float = 7.0    # SwiGLU clamping limit
+    
+    def __post_init__(self):
+        # Set default MoE layers if not specified
+        if self.moe_layers is None:
+            # Use MoE in every other layer, starting from layer 2
+            self.moe_layers = list(range(2, self.n_layer, 2))
+        
+        # Ensure head dimensions are consistent
+        assert self.n_embd % self.n_head == 0
+        if self.head_dim * self.n_head != self.n_embd:
+            self.head_dim = self.n_embd // self.n_head
+
+
+# MXFP4 Quantization Implementation (from GPT-OSS)
+class MXFP4Tensor:
+    """MXFP4 quantized tensor with block-based scaling"""
+    
+    def __init__(self, blocks: torch.Tensor, scales: torch.Tensor, original_shape: tuple):
+        self.blocks = blocks  # Packed FP4 values (uint8)
+        self.scales = scales  # Block scales (BF16)
+        self.original_shape = original_shape
+        self.block_size = 32  # Standard MXFP4 block size
+    
+    def dequantize(self) -> torch.Tensor:
+        """Dequantize MXFP4 tensor back to BF16"""
+        return dequantize_mxfp4(self.blocks, self.scales, self.original_shape)
+
+
+def quantize_mxfp4(tensor: torch.Tensor, block_size: int = 32) -> MXFP4Tensor:
+    """
+    Quantize tensor to MXFP4 format with block-based scaling
+    
+    Args:
+        tensor: Input tensor (BF16/FP32)
+        block_size: Size of quantization blocks (default: 32)
+    
+    Returns:
+        MXFP4Tensor with quantized blocks and scales
+    """
+    original_shape = tensor.shape
+    tensor = tensor.to(torch.bfloat16).float()
+    
+    # Reshape for block processing (last dimension)
+    last_dim = tensor.shape[-1]
+    if last_dim % block_size != 0:
+        # Pad to block boundary
+        pad_size = block_size - (last_dim % block_size)
+        tensor = F.pad(tensor, (0, pad_size), value=0.0)
+    
+    # Reshape to (..., num_blocks, block_size)
+    new_shape = tensor.shape[:-1] + (-1, block_size)
+    tensor = tensor.view(new_shape)
+    
+    # Compute block scales (max absolute value per block)
+    block_scales = torch.max(torch.abs(tensor), dim=-1, keepdim=True)[0]
+    block_scales = torch.clamp(block_scales, min=1e-8)  # Avoid division by zero
+    
+    # Normalize by block scales
+    normalized = tensor / block_scales
+    
+    # Quantize to 4-bit values (-7 to 7, excluding -8)
+    # FP4 format: 1 sign bit + 3 magnitude bits
+    quantized = torch.clamp(torch.round(normalized * 7.0), -7, 7)
+    
+    # Pack two 4-bit values into one uint8
+    quantized = quantized.to(torch.int8)
+    even_vals = quantized[..., ::2]  # Even indices
+    odd_vals = quantized[..., 1::2]  # Odd indices
+    
+    # Pack: high 4 bits = even, low 4 bits = odd
+    packed = ((even_vals & 0xF) << 4) | (odd_vals & 0xF)
+    packed = packed.to(torch.uint8)
+    
+    # Flatten scales and remove keepdim
+    scales = block_scales.squeeze(-1).to(torch.bfloat16)
+    
+    return MXFP4Tensor(packed, scales, original_shape)
+
+
+def dequantize_mxfp4(blocks: torch.Tensor, scales: torch.Tensor, original_shape: tuple) -> torch.Tensor:
+    """
+    Dequantize MXFP4 tensor back to BF16
+    
+    Args:
+        blocks: Packed FP4 values (uint8)
+        scales: Block scales (BF16)
+        original_shape: Original tensor shape
+    
+    Returns:
+        Dequantized tensor in BF16
+    """
+    # Unpack 4-bit values
+    even_vals = (blocks >> 4).to(torch.int8)  # High 4 bits
+    odd_vals = (blocks & 0xF).to(torch.int8)  # Low 4 bits
+    
+    # Handle sign extension for 4-bit signed values
+    even_vals = torch.where(even_vals > 7, even_vals - 16, even_vals)
+    odd_vals = torch.where(odd_vals > 7, odd_vals - 16, odd_vals)
+    
+    # Interleave even and odd values
+    unpacked_shape = blocks.shape + (2,)
+    unpacked = torch.stack([even_vals, odd_vals], dim=-1).view(unpacked_shape[:-1] + (-1,))
+    
+    # Expand scales to match unpacked shape
+    scales_expanded = scales.unsqueeze(-1).expand(-1, -1, 32).float()
+    
+    # Dequantize: convert back to float and scale
+    dequantized = unpacked.float() / 7.0 * scales_expanded
+    
+    # Reshape to original shape (removing padding if any)
+    dequantized = dequantized.view(original_shape[:-1] + (-1,))
+    if dequantized.shape[-1] > original_shape[-1]:
+        dequantized = dequantized[..., :original_shape[-1]]
+    
+    return dequantized.to(torch.bfloat16)
+
+
+def get_mxfp4_memory_info(model: nn.Module) -> dict:
+    """Get memory usage information for MXFP4 quantized model"""
+    total_params = 0
+    quantized_params = 0
+    memory_saved = 0
+    
+    for name, module in model.named_modules():
+        if isinstance(module, MoEExpert) and hasattr(module, 'use_mxfp4') and module.use_mxfp4:
+            # Count quantized parameters
+            if hasattr(module, 'gate_proj_quantized'):
+                original_size = module.gate_proj.weight.numel() * 2  # BF16 = 2 bytes
+                quantized_size = (module.gate_proj_quantized.blocks.numel() + 
+                                module.gate_proj_quantized.scales.numel() * 2)  # uint8 + BF16 scales
+                quantized_params += module.gate_proj.weight.numel()
+                memory_saved += original_size - quantized_size
+                
+            if hasattr(module, 'down_proj_quantized'):
+                original_size = module.down_proj.weight.numel() * 2  # BF16 = 2 bytes
+                quantized_size = (module.down_proj_quantized.blocks.numel() + 
+                                module.down_proj_quantized.scales.numel() * 2)  # uint8 + BF16 scales
+                quantized_params += module.down_proj.weight.numel()
+                memory_saved += original_size - quantized_size
+                
+            if hasattr(module, 'up_proj_quantized'):
+                original_size = module.up_proj.weight.numel() * 2  # BF16 = 2 bytes
+                quantized_size = (module.up_proj_quantized.blocks.numel() + 
+                                module.up_proj_quantized.scales.numel() * 2)  # uint8 + BF16 scales
+                quantized_params += module.up_proj.weight.numel()
+                memory_saved += original_size - quantized_size
+        
+        # Count all parameters
+        for param in module.parameters():
+            if param is not None:
+                total_params += param.numel()
+    
+    return {
+        'total_parameters': total_params,
+        'quantized_parameters': quantized_params,
+        'quantization_ratio': quantized_params / total_params if total_params > 0 else 0,
+        'memory_saved_bytes': memory_saved,
+        'memory_saved_mb': memory_saved / (1024 * 1024),
+        'compression_ratio': f"{memory_saved / (quantized_params * 2) * 100:.1f}%" if quantized_params > 0 else "0%"
+    }
+
+
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization (from GPT-OSS)"""
+    
+    def __init__(self, num_features: int, eps: float = 1e-5, bias: bool = False):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.scale = nn.Parameter(torch.ones(num_features))
+        self.bias = nn.Parameter(torch.zeros(num_features)) if bias else None
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Convert to float32 for numerical stability
+        x_float = x.float()
+        # Compute RMS
+        rms = torch.sqrt(torch.mean(x_float ** 2, dim=-1, keepdim=True) + self.eps)
+        # Normalize and scale
+        x_norm = (x_float / rms) * self.scale
+        if self.bias is not None:
+            x_norm = x_norm + self.bias
+        return x_norm.to(x.dtype)
+
+
+def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Apply rotary positional embedding (from GPT-OSS)"""
+    cos = cos.unsqueeze(-2).to(x.dtype)
+    sin = sin.unsqueeze(-2).to(x.dtype)
+    x1, x2 = torch.chunk(x, 2, dim=-1)
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+    return torch.cat((o1, o2), dim=-1)
+
+
+class RotaryEmbedding(nn.Module):
+    """Rotary Positional Embedding with YaRN scaling (from GPT-OSS)"""
+    
+    def __init__(
+        self,
+        head_dim: int,
+        base: float = 10000.0,
+        max_seq_len: int = 4096,
+        scaling_factor: float = 1.0,
+        ntk_alpha: float = 1.0,
+        ntk_beta: float = 32.0,
+        device: Optional[torch.device] = None,
+    ):
+        super().__init__()
+        self.head_dim = head_dim
+        self.base = base
+        self.max_seq_len = max_seq_len
+        self.scaling_factor = scaling_factor
+        self.ntk_alpha = ntk_alpha
+        self.ntk_beta = ntk_beta
+        
+        # Precompute frequency matrix
+        inv_freq = self._compute_inv_freq()
+        self.register_buffer('inv_freq', inv_freq)
+        
+        # Cache for efficiency
+        self._cached_cos = None
+        self._cached_sin = None
+        self._cached_seq_len = 0
+    
+    def _compute_inv_freq(self) -> torch.Tensor:
+        """Compute inverse frequencies with YaRN scaling"""
+        freq = self.base ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
+        
+        if self.scaling_factor > 1.0:
+            # YaRN scaling
+            d_half = self.head_dim / 2
+            low = (d_half * math.log(self.max_seq_len / (self.ntk_beta * 2 * math.pi)) / math.log(self.base))
+            high = (d_half * math.log(self.max_seq_len / (self.ntk_alpha * 2 * math.pi)) / math.log(self.base))
+            
+            interpolation = 1.0 / (self.scaling_factor * freq)
+            extrapolation = 1.0 / freq
+            
+            ramp = (torch.arange(d_half) - low) / (high - low)
+            mask = 1 - ramp.clamp(0, 1)
+            
+            inv_freq = interpolation * (1 - mask) + extrapolation * mask
+        else:
+            inv_freq = 1.0 / freq
+        
+        return inv_freq
+    
+    def _compute_cos_sin(self, seq_len: int, device: torch.device):
+        """Compute cosine and sine values"""
+        if seq_len > self._cached_seq_len or self._cached_cos is None:
+            t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+            freqs = torch.outer(t, self.inv_freq.to(device))
+            cos = freqs.cos()
+            sin = freqs.sin()
+            
+            self._cached_cos = cos
+            self._cached_sin = sin
+            self._cached_seq_len = seq_len
+        
+        return self._cached_cos[:seq_len], self._cached_sin[:seq_len]
+    
+    def forward(self, q: torch.Tensor, k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply RoPE to queries and keys"""
+        seq_len = q.shape[0] if q.dim() == 4 else q.shape[1]
+        cos, sin = self._compute_cos_sin(seq_len, q.device)
+        
+        # Apply to queries
+        q_shape = q.shape
+        if q.dim() == 4:  # [seq_len, num_heads, head_dim]
+            q = q.view(seq_len, -1, self.head_dim)
+        q_rotated = apply_rotary_emb(q, cos, sin)
+        q_rotated = q_rotated.reshape(q_shape)
+        
+        # Apply to keys
+        k_shape = k.shape
+        if k.dim() == 4:
+            k = k.view(seq_len, -1, self.head_dim)
+        k_rotated = apply_rotary_emb(k, cos, sin)
+        k_rotated = k_rotated.reshape(k_shape)
+        
+        return q_rotated, k_rotated
+
+
+def swiglu(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
+    """SwiGLU activation function (from GPT-OSS)"""
+    x_glu, x_linear = x[..., ::2], x[..., 1::2]
+    # Clamp values for numerical stability
+    x_glu = x_glu.clamp(min=None, max=limit)
+    x_linear = x_linear.clamp(min=-limit, max=limit)
+    # Apply SwiGLU
+    out_glu = x_glu * torch.sigmoid(1.702 * x_glu)  # α = 1.702
+    return out_glu * (x_linear + 1)  # Add bias of 1
+
+
+class SlidingWindowAttention(nn.Module):
+    """Sliding Window Attention with Attention Sinks (from GPT-OSS)"""
+    
+    def __init__(self, config: GPTOSSAdvancedConfig, layer_idx: int = 0):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.head_dim = config.head_dim
+        self.num_key_value_heads = config.num_key_value_heads
+        self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0  # Alternating layers
+        
+        # Grouped query attention dimensions
+        self.q_heads = self.n_head
+        self.kv_heads = self.num_key_value_heads
+        self.kv_head_dim = self.head_dim
+        self.q_per_kv = self.q_heads // self.kv_heads
+        
+        # QKV projection
+        qkv_dim = self.head_dim * (self.q_heads + 2 * self.kv_heads)
+        self.qkv_proj = nn.Linear(config.n_embd, qkv_dim, bias=config.bias)
+        
+        # Output projection
+        self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        
+        # Attention sinks (learnable parameters)
+        if config.use_attention_sinks:
+            self.attention_sinks = nn.Parameter(torch.zeros(self.q_heads))
+        else:
+            self.attention_sinks = None
+        
+        # RoPE
+        self.rope = RotaryEmbedding(
+            self.head_dim,
+            config.rope_theta,
+            config.block_size,
+            config.rope_scaling_factor,
+            config.rope_ntk_alpha,
+            config.rope_ntk_beta
+        )
+        
+        # Normalization
+        if config.use_rmsnorm:
+            self.norm = RMSNorm(config.n_embd, bias=config.bias)
+        else:
+            self.norm = nn.LayerNorm(config.n_embd, bias=config.bias)
+        
+        # Note: GPT-OSS does not use dropout
+        self.scale = 1.0 / math.sqrt(self.head_dim)
+    
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        
+        # Normalize input
+        x_norm = self.norm(x)
+        
+        # QKV projection
+        qkv = self.qkv_proj(x_norm)
+        
+        # Split into Q, K, V
+        q_dim = self.head_dim * self.q_heads
+        k_dim = self.head_dim * self.kv_heads
+        v_dim = self.head_dim * self.kv_heads
+        
+        q = qkv[:, :, :q_dim].contiguous()
+        k = qkv[:, :, q_dim:q_dim + k_dim].contiguous()
+        v = qkv[:, :, q_dim + k_dim:q_dim + k_dim + v_dim].contiguous()
+        
+        # Reshape for attention
+        q = q.view(batch_size, seq_len, self.q_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.kv_heads, self.kv_head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.kv_heads, self.kv_head_dim).transpose(1, 2)
+        
+        # Apply RoPE
+        q, k = self.rope(q.transpose(1, 2), k.transpose(1, 2))
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        
+        # Expand k, v for grouped query attention
+        if self.kv_heads < self.q_heads:
+            k = k.repeat_interleave(self.q_per_kv, dim=1)
+            v = v.repeat_interleave(self.q_per_kv, dim=1)
+        
+        # Compute attention scores
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        
+        # Apply causal mask
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
+        attn_scores.masked_fill_(causal_mask, float('-inf'))
+        
+        # Apply sliding window mask if enabled
+        if self.sliding_window > 0:
+            sliding_mask = torch.tril(
+                torch.ones(seq_len, seq_len, device=x.device), 
+                diagonal=-self.sliding_window
+            ).bool()
+            attn_scores.masked_fill_(sliding_mask, float('-inf'))
+        
+        # Add attention sinks
+        if self.attention_sinks is not None:
+            sink_scores = self.attention_sinks.view(1, -1, 1, 1).expand(batch_size, -1, seq_len, 1)
+            attn_scores = torch.cat([attn_scores, sink_scores], dim=-1)
+        
+        # Apply softmax
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        
+        # Remove sink weights and apply to values
+        if self.attention_sinks is not None:
+            attn_weights = attn_weights[..., :-1]
+        
+        # No dropout in attention (GPT-OSS compliance)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)
+        
+        # Reshape and project output
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.n_embd)
+        output = self.out_proj(attn_output)
+        
+        return output
+
+
+class MoEExpert(nn.Module):
+    """Individual expert in Mixture of Experts with MXFP4 quantization support"""
+    
+    def __init__(self, config: GPTOSSAdvancedConfig):
+        super().__init__()
+        self.config = config
+        intermediate_size = 4 * config.n_embd  # Standard 4x expansion
+        self.use_mxfp4 = config.use_mxfp4_quantization and config.quantize_moe_only
+        
+        if config.use_swiglu:
+            # SwiGLU requires 2x intermediate size for gating
+            self.gate_proj = nn.Linear(config.n_embd, intermediate_size * 2, bias=config.bias)
+            self.down_proj = nn.Linear(intermediate_size, config.n_embd, bias=config.bias)
+            
+            # MXFP4 quantization for MoE weights (GPT-OSS pattern)
+            if self.use_mxfp4:
+                self._quantize_weights()
+        else:
+            self.up_proj = nn.Linear(config.n_embd, intermediate_size, bias=config.bias)
+            self.down_proj = nn.Linear(intermediate_size, config.n_embd, bias=config.bias)
+            self.activation = nn.GELU()
+            
+            # MXFP4 quantization for MoE weights
+            if self.use_mxfp4:
+                self._quantize_weights()
+        
+        # Note: GPT-OSS does not use dropout
+    
+    def _quantize_weights(self):
+        """Quantize expert weights to MXFP4 format"""
+        if self.config.use_swiglu:
+            # Quantize gate projection weights
+            self.gate_proj_quantized = quantize_mxfp4(
+                self.gate_proj.weight.data, 
+                block_size=self.config.mxfp4_block_size
+            )
+            # Quantize down projection weights  
+            self.down_proj_quantized = quantize_mxfp4(
+                self.down_proj.weight.data,
+                block_size=self.config.mxfp4_block_size
+            )
+        else:
+            # Quantize up projection weights
+            self.up_proj_quantized = quantize_mxfp4(
+                self.up_proj.weight.data,
+                block_size=self.config.mxfp4_block_size
+            )
+            # Quantize down projection weights
+            self.down_proj_quantized = quantize_mxfp4(
+                self.down_proj.weight.data,
+                block_size=self.config.mxfp4_block_size
+            )
+    
+    def _dequantized_linear(self, x: torch.Tensor, quantized_weight: MXFP4Tensor, bias: torch.Tensor = None) -> torch.Tensor:
+        """Perform linear operation with dequantized MXFP4 weights"""
+        # Dequantize weights on-the-fly
+        weight = quantized_weight.dequantize()
+        return F.linear(x, weight, bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.config.use_swiglu:
+            if self.use_mxfp4:
+                # Use quantized weights
+                gate_output = self._dequantized_linear(x, self.gate_proj_quantized, self.gate_proj.bias)
+                output = swiglu(gate_output, self.config.swiglu_limit)
+                output = self._dequantized_linear(output, self.down_proj_quantized, self.down_proj.bias)
+            else:
+                # Standard path
+                gate_output = self.gate_proj(x)
+                output = swiglu(gate_output, self.config.swiglu_limit)
+                output = self.down_proj(output)
+        else:
+            if self.use_mxfp4:
+                # Use quantized weights
+                output = self._dequantized_linear(x, self.up_proj_quantized, self.up_proj.bias)
+                output = self.activation(output)
+                output = self._dequantized_linear(output, self.down_proj_quantized, self.down_proj.bias)
+            else:
+                # Standard path
+                output = self.up_proj(x)
+                output = self.activation(output)
+                output = self.down_proj(output)
+        
+        return output
+
+
+class MixtureOfExperts(nn.Module):
+    """Mixture of Experts layer (from GPT-OSS, scaled down)"""
+    
+    def __init__(self, config: GPTOSSAdvancedConfig):
+        super().__init__()
+        self.config = config
+        self.num_experts = config.num_experts
+        self.experts_per_token = config.experts_per_token
+        self.expert_capacity = config.expert_capacity
+        
+        # Router/gate network
+        self.gate = nn.Linear(config.n_embd, config.num_experts, bias=False)
+        
+        # Expert networks
+        self.experts = nn.ModuleList([
+            MoEExpert(config) for _ in range(config.num_experts)
+        ])
+        
+        # Normalization
+        if config.use_rmsnorm:
+            self.norm = RMSNorm(config.n_embd, bias=config.bias)
+        else:
+            self.norm = nn.LayerNorm(config.n_embd, bias=config.bias)
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size, seq_len, hidden_dim = x.shape
+        
+        # Normalize input
+        x_norm = self.norm(x)
+        
+        # Compute router logits
+        router_logits = self.gate(x_norm)  # [B, T, num_experts]
+        
+        # Get top-k experts
+        top_k_logits, top_k_indices = torch.topk(router_logits, self.experts_per_token, dim=-1)
+        top_k_probs = F.softmax(top_k_logits, dim=-1)
+        
+        # Initialize output
+        output = torch.zeros_like(x)
+        
+        # Process each token through selected experts
+        for i in range(self.experts_per_token):
+            # Get expert indices and weights for position i
+            expert_idx = top_k_indices[:, :, i]  # [B, T]
+            expert_weight = top_k_probs[:, :, i]  # [B, T]
+            
+            # Process each expert
+            for expert_id in range(self.num_experts):
+                # Find tokens that use this expert at position i
+                expert_mask = (expert_idx == expert_id)
+                
+                if expert_mask.any():
+                    # Get tokens for this expert
+                    token_indices = expert_mask.nonzero(as_tuple=True)
+                    expert_tokens = x_norm[token_indices]
+                    
+                    # Apply expert
+                    expert_output = self.experts[expert_id](expert_tokens)
+                    
+                    # Weight the output
+                    weights = expert_weight[token_indices].unsqueeze(-1)
+                    weighted_output = expert_output * weights
+                    
+                    # Add to final output
+                    output[token_indices] += weighted_output
+        
+        return output, router_logits
+    
+    def compute_aux_loss(self, router_logits: torch.Tensor) -> torch.Tensor:
+        """Compute auxiliary loss for load balancing"""
+        # Convert logits to probabilities
+        router_probs = F.softmax(router_logits, dim=-1)
+        
+        # Compute mean usage per expert
+        mean_expert_usage = router_probs.mean(dim=[0, 1])  # [num_experts]
+        
+        # Target is uniform distribution
+        target_usage = 1.0 / self.num_experts
+        
+        # L2 loss for load balancing
+        aux_loss = torch.sum((mean_expert_usage - target_usage) ** 2)
+        
+        return aux_loss
+
+
+class MultiTokenPredictor(nn.Module):
+    """Multi-token prediction head (from DeepSeek)"""
+    
+    def __init__(self, config: GPTOSSAdvancedConfig):
+        super().__init__()
+        self.config = config
+        self.num_predictions = config.multi_token_predict
+        
+        # Separate prediction heads for each future token
+        self.predictors = nn.ModuleList([
+            nn.Linear(config.n_embd, config.vocab_size, bias=False)
+            for _ in range(config.multi_token_predict)
+        ])
+    
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Predict multiple future tokens"""
+        predictions = []
+        
+        for i, predictor in enumerate(self.predictors):
+            # Use current hidden states to predict i+1 steps ahead
+            logits = predictor(hidden_states)
+            predictions.append(logits)
+        
+        # Stack predictions: [batch_size, seq_len, num_predictions, vocab_size]
+        return torch.stack(predictions, dim=2)
+
+
+class GPTOSSAdvancedBlock(nn.Module):
+    """Advanced transformer block combining all features"""
+    
+    def __init__(self, config: GPTOSSAdvancedConfig, layer_idx: int):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        
+        # Attention layer
+        self.attention = SlidingWindowAttention(config, layer_idx)
+        
+        # MLP layer - use MoE if specified for this layer
+        if layer_idx in config.moe_layers:
+            self.mlp = MixtureOfExperts(config)
+            self.use_moe = True
+        else:
+            # Standard MLP
+            self.mlp = self._create_standard_mlp(config)
+            self.use_moe = False
+    
+    def _create_standard_mlp(self, config: GPTOSSAdvancedConfig) -> nn.Module:
+        """Create standard MLP layer"""
+        class StandardMLP(nn.Module):
+            def __init__(self, config):
+                super().__init__()
+                intermediate_size = 4 * config.n_embd
+                
+                if config.use_rmsnorm:
+                    self.norm = RMSNorm(config.n_embd, bias=config.bias)
+                else:
+                    self.norm = nn.LayerNorm(config.n_embd, bias=config.bias)
+                
+                if config.use_swiglu:
+                    self.gate_proj = nn.Linear(config.n_embd, intermediate_size * 2, bias=config.bias)
+                    self.down_proj = nn.Linear(intermediate_size, config.n_embd, bias=config.bias)
+                else:
+                    self.up_proj = nn.Linear(config.n_embd, intermediate_size, bias=config.bias)
+                    self.down_proj = nn.Linear(intermediate_size, config.n_embd, bias=config.bias)
+                    self.activation = nn.GELU()
+                
+                # Note: GPT-OSS does not use dropout
+                self.config = config
+            
+            def forward(self, x):
+                x_norm = self.norm(x)
+                if self.config.use_swiglu:
+                    gate_output = self.gate_proj(x_norm)
+                    output = swiglu(gate_output, self.config.swiglu_limit)
+                    output = self.down_proj(output)
+                else:
+                    output = self.up_proj(x_norm)
+                    output = self.activation(output)
+                    output = self.down_proj(output)
+                return output, None
+        
+        return StandardMLP(config)
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # Self-attention with residual connection
+        attn_output = self.attention(x)
+        x = x + attn_output
+        
+        # MLP with residual connection
+        if self.use_moe:
+            mlp_output, router_logits = self.mlp(x)
+            x = x + mlp_output
+            return x, router_logits
+        else:
+            mlp_output, _ = self.mlp(x)
+            x = x + mlp_output
+            return x, None
+
+
+class GPTOSSAdvanced(nn.Module):
+    """
+    GPT-OSS Advanced Model for Children's Stories
+    
+    Combines the best features from:
+    - GPT-OSS: Advanced architecture, MoE, sliding window attention
+    - DeepSeek: Multi-token prediction, advanced optimizations
+    - Tiny Stories: Clean structure, educational focus
+    """
+    
+    def __init__(self, config: GPTOSSAdvancedConfig):
+        super().__init__()
+        assert isinstance(config, GPTOSSAdvancedConfig)
+        self.config = config
+        
+        # Token embeddings only (GPT-OSS uses RoPE, not learned positional embeddings)
+        self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
+        
+        # Note: GPT-OSS does not use dropout
+        
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            GPTOSSAdvancedBlock(config, layer_idx) 
+            for layer_idx in range(config.n_layer)
+        ])
+        
+        # Final layer norm
+        if config.use_rmsnorm:
+            self.ln_f = RMSNorm(config.n_embd, bias=config.bias)
+        else:
+            self.ln_f = nn.LayerNorm(config.n_embd, bias=config.bias)
+        
+        # Output heads
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        
+        # Multi-token predictor
+        if config.multi_token_predict > 0:
+            self.multi_token_head = MultiTokenPredictor(config)
+        else:
+            self.multi_token_head = None
+        
+        # Weight tying (GPT-OSS style)
+        self.token_embedding.weight = self.lm_head.weight
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+        
+        # Special initialization for output projections
+        for name, param in self.named_parameters():
+            if name.endswith('out_proj.weight') or name.endswith('down_proj.weight'):
+                nn.init.normal_(param, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
+    
+    def _init_weights(self, module):
+        """Initialize weights following GPT-style initialization"""
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, (nn.LayerNorm, RMSNorm)):
+            if hasattr(module, 'weight') and module.weight is not None:
+                nn.init.ones_(module.weight)
+            if hasattr(module, 'bias') and module.bias is not None:
+                nn.init.zeros_(module.bias)
+    
+    def forward(self, input_ids: torch.Tensor, targets: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        batch_size, seq_len = input_ids.shape
+        assert seq_len <= self.config.block_size, f"Sequence length {seq_len} exceeds block size {self.config.block_size}"
+        
+        # Token embeddings only (GPT-OSS uses RoPE for positional information)
+        x = self.token_embedding(input_ids)  # [B, T, C]
+        # No dropout in GPT-OSS
+        
+        # Forward through transformer blocks
+        router_logits_list = []
+        for block in self.blocks:
+            x, router_logits = block(x)
+            if router_logits is not None:
+                router_logits_list.append(router_logits)
+        
+        # Final layer norm
+        x = self.ln_f(x)
+        
+        # Compute loss if targets provided
+        if targets is not None:
+            if self.multi_token_head is not None:
+                # Multi-token prediction
+                multi_logits = self.multi_token_head(x)
+                loss = self._compute_multi_token_loss(multi_logits, targets)
+                logits = multi_logits[:, :, 0, :]  # First prediction for compatibility
+            else:
+                # Standard single-token prediction
+                logits = self.lm_head(x)
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)), 
+                    targets.view(-1), 
+                    ignore_index=-1
+                )
+            
+            # Add MoE auxiliary loss
+            if router_logits_list and self.config.moe_aux_loss_coeff > 0:
+                aux_loss = 0
+                for i, router_logits in enumerate(router_logits_list):
+                    layer_idx = [j for j, layer in enumerate(self.config.moe_layers) if layer == i][0]
+                    aux_loss += self.blocks[layer_idx].mlp.compute_aux_loss(router_logits)
+                
+                loss += self.config.moe_aux_loss_coeff * aux_loss
+            
+            return logits, loss
+        else:
+            # Inference mode - only compute logits for last token
+            logits = self.lm_head(x[:, [-1], :])
+            return logits, None
+    
+    def _compute_multi_token_loss(self, multi_logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute loss for multi-token prediction"""
+        batch_size, seq_len, num_predictions, vocab_size = multi_logits.shape
+        
+        total_loss = 0
+        for i in range(num_predictions):
+            # Shift targets by i+1 positions
+            if i + 1 < seq_len:
+                shifted_targets = targets[:, i+1:]
+                prediction_logits = multi_logits[:, :seq_len-i-1, i, :]
+                
+                loss = F.cross_entropy(
+                    prediction_logits.contiguous().view(-1, vocab_size),
+                    shifted_targets.contiguous().view(-1),
+                    ignore_index=-1
+                )
+                total_loss += loss
+        
+        return total_loss / num_predictions
+    
+    @torch.no_grad()
+    def generate(self, input_ids: torch.Tensor, max_new_tokens: int = 100, 
+                 temperature: float = 1.0, top_k: Optional[int] = None, 
+                 top_p: Optional[float] = None) -> torch.Tensor:
+        """Generate text using the model"""
+        self.eval()
+        
+        for _ in range(max_new_tokens):
+            # Crop input_ids if it exceeds block_size
+            input_ids_cond = input_ids if input_ids.size(1) <= self.config.block_size else input_ids[:, -self.config.block_size:]
+            
+            # Forward pass
+            logits, _ = self(input_ids_cond)
+            logits = logits[:, -1, :] / temperature
+            
+            # Apply top-k filtering
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('inf')
+            
+            # Apply top-p (nucleus) filtering
+            if top_p is not None:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # Remove tokens with cumulative probability above the threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = -float('inf')
+            
+            # Sample next token
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            
+            # Append to sequence
+            input_ids = torch.cat((input_ids, next_token), dim=1)
+        
+        return input_ids
+    
+    def get_num_params(self, non_embedding: bool = True) -> int:
+        """Get number of parameters in the model"""
+        n_params = sum(p.numel() for p in self.parameters())
+        if non_embedding:
+            n_params -= self.token_embedding.weight.numel()
+        return n_params
+    
+    @classmethod
+    def from_pretrained(cls, model_type: str, override_args: Optional[dict] = None):
+        """Load a pretrained model (placeholder for future implementation)"""
+        config = GPTOSSAdvancedConfig()
+        if override_args:
+            for key, value in override_args.items():
+                setattr(config, key, value)
+        return cls(config)

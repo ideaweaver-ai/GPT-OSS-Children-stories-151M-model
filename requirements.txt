@@ -1,0 +1,38 @@
+# Core dependencies for GPT-OSS (minimal, conflict-free)
+torch>=2.0.0
+numpy>=1.20.0
+tqdm>=4.65.0
+
+# Essential ML libraries
+transformers>=4.30.0
+datasets>=2.12.0
+tiktoken>=0.9.0
+
+# GPT-OSS specific (core only)
+openai-harmony
+safetensors>=0.5.3
+
+# Training essentials (minimal versions)
+accelerate>=0.20.0
+
+# Visualization and monitoring (optional)
+matplotlib>=3.5.0
+wandb>=0.15.0
+
+# Data processing utilities
+huggingface_hub>=0.16.0
+psutil>=5.8.0
+requests>=2.25.0
+
+# Development tools (optional - install separately if needed)
+# pytest>=7.0.0
+# black>=22.0.0
+# flake8>=4.0.0
+
+# Optional advanced features (install manually if needed):
+# pip install bitsandbytes  # For quantization
+# pip install peft  # For LoRA/adapter training  
+# pip install xformers  # For optimized attention
+# pip install einops  # For tensor operations
+# pip install gradio  # For web interface
+# pip install streamlit  # For web interface
